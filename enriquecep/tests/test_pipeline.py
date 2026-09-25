@@ -6,10 +6,19 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import app.email_intel as email_intel
 import app.sources as sources
 from app.main import app, _jobs
 
 client = TestClient(app)
+
+AUTH = {"Authorization": "Bearer acct-e2e"}
+
+
+@pytest.fixture(autouse=True)
+def creditos():
+    from app import billing
+    billing.add_credits("acct-e2e", 10_000, motivo="teste")
 
 
 async def fake_client_get(self, url, **kw):
@@ -24,6 +33,12 @@ async def fake_client_get(self, url, **kw):
 @pytest.fixture(autouse=True)
 def mock_sources(monkeypatch):
     monkeypatch.setattr(sources, "_cache", {})  # cache limpo por teste
+
+    async def _no_dns(domain):
+        return {"registrado": False, "free_domain": True, "tem_mx": False,
+                "mx": [], "a": [], "tipo_dominio": "indisponivel"}
+
+    monkeypatch.setattr(email_intel, "check_domain", _no_dns)  # E2E sem rede/DNS real
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_client_get)
 
 
@@ -36,7 +51,7 @@ def test_e2e_csv_import_batch_export():
     ).encode("utf-8")
 
     # 1) upload CSV tolerante → mapeia colunas + dedup
-    r = client.post("/import/csv", files={"file": ("leads.csv", io.BytesIO(csv_bytes), "text/csv")})
+    r = client.post("/import/csv", files={"file": ("leads.csv", io.BytesIO(csv_bytes), "text/csv")}, headers=AUTH)
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["total_recebido"] == 3
@@ -46,7 +61,7 @@ def test_e2e_csv_import_batch_export():
     leads = j["leads"]
 
     # 2) dispara o lote com os leads canônicos
-    r = client.post("/enrich/batch", json={"leads": leads})
+    r = client.post("/enrich/batch", json={"leads": leads}, headers=AUTH)
     assert r.status_code == 200
     job_id = r.json()["job_id"]
     assert r.json()["total"] == 2
@@ -75,7 +90,7 @@ def test_e2e_csv_import_batch_export():
 
 def test_batch_sem_dedupe_opcional():
     leads = [{"nome": "X", "cep": "70040010"}, {"nome": "X", "cep": "70040010"}]
-    r = client.post("/enrich/batch", json={"leads": leads, "dedupe": False})
+    r = client.post("/enrich/batch", json={"leads": leads, "dedupe": False}, headers=AUTH)
     assert r.json()["total"] == 2
-    r = client.post("/enrich/batch", json={"leads": leads, "dedupe": True})
+    r = client.post("/enrich/batch", json={"leads": leads, "dedupe": True}, headers=AUTH)
     assert r.json()["total"] == 1  # nomes idênticos → dedup agrupa
